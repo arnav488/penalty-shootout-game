@@ -565,13 +565,21 @@ class PenaltyShootout:
         """Draw the game over screen"""
         self.screen.fill(GREEN)
         
+        # Show forfeit message if applicable
+        if hasattr(self, "forfeit_message"):
+            forfeit_text = self.large_font.render(self.forfeit_message, True, RED)
+            forfeit_rect = forfeit_text.get_rect(center=(SCREEN_WIDTH//2, 150))
+            self.screen.blit(forfeit_text, forfeit_rect)
+        
         # Final score
         score_text = self.large_font.render(f"Final Score: You {self.user_score} - Computer {self.computer_score}", True, WHITE)
         score_rect = score_text.get_rect(center=(SCREEN_WIDTH//2, 200))
         self.screen.blit(score_text, score_rect)
         
         # Winner
-        if self.user_score > self.computer_score:
+        if hasattr(self, "forfeit_message"):
+            winner_text = self.large_font.render("Computer Wins!", True, RED)
+        elif self.user_score > self.computer_score:
             winner_text = self.large_font.render("You Win!", True, YELLOW)
         elif self.computer_score > self.user_score:
             winner_text = self.large_font.render("Computer Wins!", True, RED)
@@ -777,12 +785,13 @@ class PenaltyShootout:
                         self.state = PLAYING
                     # Quit (forfeit)
                     elif self.quit_btn.collidepoint(mouse_pos):
-                        # optional: flash a forfeit message
+                        # Set forfeit message and go to game over state
                         self.forfeit_message = "You forfeited the match!"
                         print("Forfeit message set!")  # Debug output
-                        # reset and go back to main menu
-                        self.reset_game()
-                        self.state = MENU
+                        # Set computer as winner and go to game over
+                        self.computer_score = 5
+                        self.user_score = 0
+                        self.state = GAME_OVER
                     return True  # swallow other clicks while paused
                 
                 elif self.state == GAME_OVER:
