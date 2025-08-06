@@ -3,13 +3,15 @@ import random
 import math
 import sys
 import os
+import json
+from datetime import datetime
 
 # Initialize Pygame
 pygame.init()
 
 # Constants
-SCREEN_WIDTH = 800
-SCREEN_HEIGHT = 600
+SCREEN_WIDTH = 1024
+SCREEN_HEIGHT = 768
 FPS = 60
 
 # Colors
@@ -21,6 +23,7 @@ BLUE = (0, 0, 255)
 YELLOW = (255, 255, 0)
 GRAY = (128, 128, 128)
 LIGHT_GRAY = (200, 200, 200)
+DARK_GRAY = (64, 64, 64)
 
 # Game states
 MENU = "menu"
@@ -28,6 +31,8 @@ CHOOSE_SIDE = "choose_side"
 PLAYING = "playing"
 PAUSED = "paused"
 GAME_OVER = "game_over"
+STATS = "stats"
+SETTINGS = "settings"
 
 class PenaltyShootout:
     def __init__(self):
@@ -38,9 +43,15 @@ class PenaltyShootout:
         self.large_font = pygame.font.Font(None, 48)
         self.small_font = pygame.font.Font(None, 24)
         
+        # Load settings and stats first
+        self.settings_file = "game_settings.json"
+        self.stats_file = "game_stats.json"
+        self.settings = self.load_settings()
+        self.stats = self.load_stats()
+        
         # Game state
         self.state = MENU
-        self.difficulty = "normal"
+        self.difficulty = self.settings.get("default_difficulty", "normal")
         self.user_score = 0
         self.computer_score = 0
         self.win_score = 5
@@ -64,19 +75,27 @@ class PenaltyShootout:
         self.save_alpha = 0  # For fade-in animations
         
         # Ball and animation state
-        self.ball_pos = [400, 500]
-        self.ball_target = [400, 200]
+        self.ball_pos = [512, 650]
+        self.ball_target = [512, 300]
         self.ball_moving = False
         self.animation_timer = 0
         self.goal_animation = False
         self.save_animation = False
         self.animation_delay = 0
         
+        # Enhanced Power Meter State
+        self.aiming = False          # whether we're in the power-aim phase
+        self.aim_timer = 0.0         # elapsed time in the current cycle
+        self.aim_duration = 1.0      # time (sec) to fill from 0→1
+        self.fill_level = 0.0        # normalized [0.0, 1.0]
+        self.selected_power = 0.0    # locked-in power for this shot
+        self.aim_direction = None    # remember L/C/R for shot target
+        
         # Goal dimensions
-        self.goal_left = 300
-        self.goal_right = 500
-        self.goal_top = 150
-        self.goal_bottom = 250
+        self.goal_left = 400
+        self.goal_right = 624
+        self.goal_top = 200
+        self.goal_bottom = 350
         
         # Shot directions
         self.shot_directions = ["left", "center", "right"]
@@ -111,14 +130,14 @@ class PenaltyShootout:
         
         # Button rectangles
         self.buttons = {
-            "left": pygame.Rect(200, 450, 100, 50),
-            "center": pygame.Rect(350, 450, 100, 50),
-            "right": pygame.Rect(500, 450, 100, 50),
-            "easy": pygame.Rect(200, 300, 100, 50),
-            "normal": pygame.Rect(350, 300, 100, 50),
-            "hard": pygame.Rect(500, 300, 100, 50),
-            "player": pygame.Rect(200, 350, 150, 60),
-            "computer": pygame.Rect(450, 350, 150, 60)
+            "left": pygame.Rect(300, 600, 120, 60),
+            "center": pygame.Rect(450, 600, 120, 60),
+            "right": pygame.Rect(600, 600, 120, 60),
+            "easy": pygame.Rect(300, 400, 120, 60),
+            "normal": pygame.Rect(450, 400, 120, 60),
+            "hard": pygame.Rect(600, 400, 120, 60),
+            "player": pygame.Rect(300, 500, 150, 70),
+            "computer": pygame.Rect(550, 500, 150, 70)
         }
         
         # Pause button (hamburger) in top-right
@@ -222,6 +241,56 @@ class PenaltyShootout:
             pygame.draw.rect(self.screen, color,
                              (x, y + i*(bar_h + spacing), w, bar_h), border_radius=2)
     
+    def draw_power_meter(self):
+        """Draw the power meter bar"""
+        if not self.aiming or not self.settings.get("show_power_meter", True):
+            return
+            
+        # Power meter dimensions (positioned under the yellow text, moved right)
+        meter_x = 80
+        meter_y = 400  # moved down to be under the yellow text
+        meter_width = 30
+        meter_height = 200
+        
+        # Draw background track (dark, semi-transparent)
+        background_rect = pygame.Rect(meter_x, meter_y - meter_height, meter_width, meter_height)
+        pygame.draw.rect(self.screen, DARK_GRAY, background_rect, border_radius=5)
+        
+        # Calculate fill height
+        fill_height = int(meter_height * self.fill_level)
+        
+        # Choose color based on fill level
+        if self.fill_level < 0.33:
+            color = (0, 200, 0)  # green
+        elif self.fill_level < 0.66:
+            color = (200, 200, 0)  # yellow
+        else:
+            color = (200, 0, 0)  # red
+        
+        # Draw fill bar (rises from bottom to top)
+        if fill_height > 0:
+            fill_rect = pygame.Rect(meter_x + 2, meter_y - fill_height, 
+                                   meter_width - 4, fill_height)
+            pygame.draw.rect(self.screen, color, fill_rect, border_radius=5)
+        
+        # Draw marker arrow next to current fill level
+        marker_y = meter_y - fill_height
+        pygame.draw.polygon(self.screen, WHITE, [
+            (meter_x + meter_width + 5, marker_y),
+            (meter_x + meter_width + 15, marker_y - 5),
+            (meter_x + meter_width + 15, marker_y + 5)
+        ])
+        
+        # Draw power percentage
+        power_text = self.small_font.render(f"{int(self.fill_level * 100)}%", True, WHITE)
+        power_rect = power_text.get_rect(center=(meter_x + meter_width//2, meter_y + 20))
+        self.screen.blit(power_text, power_rect)
+        
+        # Draw instructions
+        instruction_text = self.small_font.render("Click to lock power", True, WHITE)
+        instruction_rect = instruction_text.get_rect(center=(meter_x + meter_width//2, meter_y + 40))
+        self.screen.blit(instruction_text, instruction_rect)
+    
     def draw_goal(self):
         """Draw the goal frame"""
         pygame.draw.rect(self.screen, WHITE, (self.goal_left, self.goal_top, 
@@ -246,8 +315,8 @@ class PenaltyShootout:
     
     def draw_goalkeeper(self, direction):
         """Draw the goalkeeper"""
-        gk_x = 400
-        gk_y = 200
+        gk_x = 512
+        gk_y = 275
         
         # Draw goalkeeper body
         pygame.draw.circle(self.screen, BLUE, (gk_x, gk_y), 15)
@@ -316,13 +385,19 @@ class PenaltyShootout:
         if self.ball_moving:
             self.animation_timer += 1
             
-            # Calculate ball position based on time
-            progress = self.animation_timer / 60  # 1 second animation
+            # Calculate ball position based on time with power meter
+            # 1. Mapping fill level → shot duration
+            base_time = 60  # 1 second animation at power=0.5
+            speed_factor = 0.5 + self.selected_power  # ranges 0.5 (weak) → 1.5 (strong)
+            ball_duration = base_time / speed_factor
+            progress = self.animation_timer / ball_duration
             
             if progress <= 1:
-                # Parabolic trajectory
+                # 2. Mapping fill level → arc height
                 x = self.ball_pos[0] + (self.ball_target[0] - self.ball_pos[0]) * progress
-                y = self.ball_pos[1] - 100 * math.sin(progress * math.pi) + (self.ball_target[1] - self.ball_pos[1]) * progress
+                # max_arc = 150, arc_height = max_arc * (1.0 - p)
+                arc_height = 150 * (1 - self.selected_power)  # more arc at low power
+                y = self.ball_pos[1] - arc_height * math.sin(progress * math.pi) + (self.ball_target[1] - self.ball_pos[1]) * progress
                 
                 self.ball_pos = [x, y]
                 
@@ -341,11 +416,23 @@ class PenaltyShootout:
                 was_goal = False
                 if in_net:
                     if self.current_phase == "player_shoot":
-                        # compare shot vs CPU dive
-                        if self.user_shot == self.cpu_keeper_guess:
+                        # 3. Mapping fill level → keeper's save chance
+                        settings = self.difficulty_settings[self.difficulty]
+                        base_save = settings["cpu_guess_accuracy"]
+                        
+                        # reduce save chance by up to 50% at full power
+                        modifier = 1.0 - (self.selected_power * 0.5)    
+                        # → at p=0   → modifier=1.0  (no change)
+                        # → at p=1.0 → modifier=0.5  (halved save chance)
+                        final_save_chance = base_save * modifier
+                        
+                        # When the ball crosses the line you then roll:
+                        if random.random() < final_save_chance and self.user_shot == self.cpu_keeper_guess:
+                            # CPU "dives" correctly → save
                             self.save_animation = True
                             was_goal = False  # saved
                         else:
+                            # goal
                             self.user_score += 1
                             self.goal_animation = True
                             was_goal = True   # goal
@@ -376,11 +463,11 @@ class PenaltyShootout:
     def get_shot_target(self, direction):
         """Get the target position for a shot direction"""
         if direction == "left":
-            return [self.goal_left + 30, self.goal_top + 50]
+            return [self.goal_left + 50, self.goal_top + 75]
         elif direction == "center":
-            return [400, self.goal_top + 50]
+            return [512, self.goal_top + 75]
         else:  # right
-            return [self.goal_right - 30, self.goal_top + 50]
+            return [self.goal_right - 50, self.goal_top + 75]
     
     def computer_guess(self):
         """Computer makes a guess based on difficulty"""
@@ -404,9 +491,6 @@ class PenaltyShootout:
             msg = self.small_font.render(self.forfeit_message, True, RED)
             rect = msg.get_rect(center=(SCREEN_WIDTH//2, 150))
             self.screen.blit(msg, rect)
-            print(f"Drawing forfeit message: {self.forfeit_message}")  # Debug output
-            # Keep the message for a few frames instead of deleting immediately
-            # We'll remove it in the reset_game method
         
         # Title
         title = self.large_font.render("Penalty Shootout", True, WHITE)
@@ -418,24 +502,45 @@ class PenaltyShootout:
         subtitle_rect = subtitle.get_rect(center=(SCREEN_WIDTH//2, 200))
         self.screen.blit(subtitle, subtitle_rect)
         
-        # Difficulty buttons
-        for difficulty, rect in [("easy", self.buttons["easy"]), 
-                               ("normal", self.buttons["normal"]), 
-                               ("hard", self.buttons["hard"])]:
+        # Difficulty buttons (centered)
+        diff_button_width = 120
+        diff_button_height = 50
+        diff_button_spacing = 30
+        total_diff_width = diff_button_width * 3 + diff_button_spacing * 2
+        diff_start_x = (SCREEN_WIDTH - total_diff_width) // 2
+        diff_y = 250
+        
+        for i, difficulty in enumerate(["easy", "normal", "hard"]):
+            diff_rect = pygame.Rect(diff_start_x + i * (diff_button_width + diff_button_spacing), diff_y, diff_button_width, diff_button_height)
             base_color = YELLOW if difficulty == self.difficulty else GRAY
             hover_color = LIGHT_GRAY
-            self.draw_button(rect, difficulty.title(), base_color, hover_color)
-            
-            # Show difficulty settings
-            if difficulty == self.difficulty:
-                settings = self.difficulty_settings[difficulty]
-                settings_text = self.small_font.render(f"CPU: {settings['cpu_guess_accuracy']*100:.0f}% | You: {settings['player_guess_accuracy']*100:.0f}%", True, WHITE)
-                settings_rect = settings_text.get_rect(center=(SCREEN_WIDTH//2, 280))
-                self.screen.blit(settings_text, settings_rect)
+            self.draw_button(diff_rect, difficulty.title(), base_color, hover_color)
+        
+        # Show difficulty settings between difficulty buttons and continue button
+        settings = self.difficulty_settings[self.difficulty]
+        settings_text = self.small_font.render(f"CPU: {settings['cpu_guess_accuracy']*100:.0f}% | You: {settings['player_guess_accuracy']*100:.0f}%", True, WHITE)
+        settings_rect = settings_text.get_rect(center=(SCREEN_WIDTH//2, 350))
+        self.screen.blit(settings_text, settings_rect)
+        
+        # Menu buttons (centered and evenly spaced)
+        button_width = 200
+        button_height = 60
+        button_spacing = 20
+        total_height = button_height * 3 + button_spacing * 2
+        start_y = 400  # Moved up to make room for percentage text
+        center_x = SCREEN_WIDTH // 2 - button_width // 2
         
         # Continue button
-        continue_rect = pygame.Rect(300, 400, 200, 60)
+        continue_rect = pygame.Rect(center_x, start_y, button_width, button_height)
         self.draw_button(continue_rect, "Continue", RED, (200, 0, 0))
+        
+        # Stats button
+        stats_rect = pygame.Rect(center_x, start_y + button_height + button_spacing, button_width, button_height)
+        self.draw_button(stats_rect, "Statistics", BLUE, (0, 0, 200))
+        
+        # Settings button
+        settings_rect = pygame.Rect(center_x, start_y + (button_height + button_spacing) * 2, button_width, button_height)
+        self.draw_button(settings_rect, "Settings", GRAY, LIGHT_GRAY)
     
     def draw_choose_side(self):
         """Draw the side selection screen"""
@@ -446,20 +551,28 @@ class PenaltyShootout:
         title_rect = title.get_rect(center=(SCREEN_WIDTH//2, 150))
         self.screen.blit(title, title_rect)
         
+        # Center the side selection buttons
+        button_width = 150
+        button_height = 70
+        button_spacing = 50
+        total_width = button_width * 2 + button_spacing
+        start_x = (SCREEN_WIDTH - total_width) // 2
+        y_pos = 300
+        
         # Player button
-        player_rect = self.buttons["player"]
+        player_rect = pygame.Rect(start_x, y_pos, button_width, button_height)
         base_color = YELLOW if self.user_is_player else GRAY
         hover_color = LIGHT_GRAY
         self.draw_button(player_rect, "Player", base_color, hover_color)
         
         # Computer button
-        computer_rect = self.buttons["computer"]
+        computer_rect = pygame.Rect(start_x + button_width + button_spacing, y_pos, button_width, button_height)
         base_color = YELLOW if not self.user_is_player else GRAY
         hover_color = LIGHT_GRAY
         self.draw_button(computer_rect, "Computer", base_color, hover_color)
         
-        # Start button
-        start_rect = pygame.Rect(300, 450, 200, 60)
+        # Start button (centered below the side buttons)
+        start_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, y_pos + button_height + 50, 200, 60)
         self.draw_button(start_rect, "Start Game", RED, (200, 0, 0))
     
     def draw_game(self):
@@ -495,6 +608,13 @@ class PenaltyShootout:
                 hover_color = LIGHT_GRAY
                 self.draw_button(rect, direction.title(), base_color, hover_color)
         
+        # Draw power meter instructions when in power-aim phase
+        elif self.current_phase == "power_aim":
+            # Hide direction buttons during power meter
+            instruction_text = self.large_font.render("Click to lock power!", True, YELLOW)
+            instruction_rect = instruction_text.get_rect(center=(SCREEN_WIDTH//2, 380))
+            self.screen.blit(instruction_text, instruction_rect)
+        
         # Draw save direction buttons (when player is saving)
         elif self.current_phase == "player_save" and not self.ball_moving:
             for direction, rect in [("left", self.buttons["left"]), 
@@ -503,6 +623,9 @@ class PenaltyShootout:
                 base_color = YELLOW if direction == self.player_keeper_guess else GRAY
                 hover_color = LIGHT_GRAY
                 self.draw_button(rect, direction.title(), base_color, hover_color)
+        
+        # Draw power meter
+        self.draw_power_meter()
         
         # Draw hamburger icon
         self.draw_hamburger()
@@ -543,6 +666,19 @@ class PenaltyShootout:
         player_acc_text = self.small_font.render(f"Your Save: {settings['player_guess_accuracy']*100:.0f}%", True, WHITE)
         self.screen.blit(cpu_acc_text, (10, 110))
         self.screen.blit(player_acc_text, (10, 130))
+        
+        # Show power meter effects when aiming
+        if self.aiming:
+            power_effects = self.small_font.render(f"Power: {int(self.fill_level*100)}% → Speed: {1.0/(0.5 + self.fill_level):.1f}s", True, YELLOW)
+            self.screen.blit(power_effects, (10, 150))
+            
+            # Show save chance modifier
+            settings = self.difficulty_settings[self.difficulty]
+            base_save = settings["cpu_guess_accuracy"]
+            modifier = 1.0 - (self.fill_level * 0.5)
+            final_save = base_save * modifier
+            save_chance_text = self.small_font.render(f"Save chance: {final_save*100:.0f}% (base: {base_save*100:.0f}%)", True, YELLOW)
+            self.screen.blit(save_chance_text, (10, 170))
         
         # Draw result messages with fade-in animations
         if self.goal_animation:
@@ -599,12 +735,12 @@ class PenaltyShootout:
             sudden_death_rect = sudden_death_text.get_rect(center=(SCREEN_WIDTH//2, 330))
             self.screen.blit(sudden_death_text, sudden_death_rect)
         
-        # Play again button
-        play_again_rect = pygame.Rect(300, 380, 200, 60)
+        # Play again button (centered)
+        play_again_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 450, 200, 60)
         self.draw_button(play_again_rect, "Play Again", BLUE, (0, 0, 200))
         
-        # Menu button
-        menu_rect = pygame.Rect(300, 460, 200, 60)
+        # Menu button (centered)
+        menu_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 530, 200, 60)
         self.draw_button(menu_rect, "Main Menu", GRAY, LIGHT_GRAY)
     
     def reset_game(self):
@@ -612,7 +748,7 @@ class PenaltyShootout:
         self.user_score = 0
         self.computer_score = 0
         self.current_phase = "player_shoot"
-        self.ball_pos = [400, 500]
+        self.ball_pos = [512, 650]
         self.ball_moving = False
         self.animation_timer = 0
         self.goal_animation = False
@@ -629,7 +765,7 @@ class PenaltyShootout:
         self.save_alpha = 0
         
         # Reset ball position for sprite
-        self.ball_pos = [400, 500]
+        self.ball_pos = [512, 650]
         
         # NEW: Reset shootout-specific state
         self.player_kicks = 0
@@ -644,6 +780,207 @@ class PenaltyShootout:
         # Clear forfeit message when starting new game
         if hasattr(self, "forfeit_message"):
             del self.forfeit_message
+        
+        # Reset power meter
+        self.aiming = False
+        self.aim_timer = 0.0
+        self.fill_level = 0.0
+        self.selected_power = 0.0
+        self.aim_direction = None
+        
+        # Load statistics
+        self.stats_file = "game_stats.json"
+        self.stats = self.load_stats()
+        
+        # Reset stats recording flag
+        if hasattr(self, "stats_recorded"):
+            del self.stats_recorded
+        
+
+    
+    def load_stats(self):
+        """Load statistics from file"""
+        try:
+            with open(self.stats_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {"games": [], "total_games": 0, "wins": 0, "losses": 0, "ties": 0}
+    
+    def save_stats(self):
+        """Save statistics to file"""
+        with open(self.stats_file, 'w') as f:
+            json.dump(self.stats, f, indent=2)
+    
+    def record_game_stats(self):
+        """Record current game statistics"""
+        game_stats = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "difficulty": self.difficulty,
+            "player_score": self.user_score,
+            "cpu_score": self.computer_score,
+            "player_kicks": self.player_kicks,
+            "cpu_kicks": self.cpu_kicks,
+            "sudden_death": self.sudden_death,
+            "forfeited": hasattr(self, "forfeit_message")
+        }
+        
+        # Calculate accuracy
+        if self.player_kicks > 0:
+            goals_scored = sum(self.player_results)
+            game_stats["player_accuracy"] = goals_scored / self.player_kicks
+        else:
+            game_stats["player_accuracy"] = 0.0
+        
+        self.stats["games"].append(game_stats)
+        self.stats["total_games"] += 1
+        
+        # Update win/loss/ties
+        if self.user_score > self.computer_score:
+            self.stats["wins"] += 1
+        elif self.computer_score > self.user_score:
+            self.stats["losses"] += 1
+        else:
+            self.stats["ties"] += 1
+        
+        self.save_stats()
+    
+    def load_settings(self):
+        """Load settings from file"""
+        try:
+            with open(self.settings_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return {
+                "default_difficulty": "normal",
+                "sound_volume": 0.7,
+                "show_power_meter": True,
+                "show_instructions": True,
+                "ball_speed": 1.0
+            }
+    
+    def save_settings(self):
+        """Save settings to file"""
+        with open(self.settings_file, 'w') as f:
+            json.dump(self.settings, f, indent=2)
+    
+    def draw_settings_screen(self):
+        """Draw the settings screen"""
+        self.screen.fill(GREEN)
+        
+        # Title
+        title = self.large_font.render("Game Settings", True, WHITE)
+        title_rect = title.get_rect(center=(SCREEN_WIDTH//2, 50))
+        self.screen.blit(title, title_rect)
+        
+        # Settings options
+        y_pos = 120
+        line_height = 50
+        
+        # Default difficulty
+        diff_text = self.font.render(f"Default Difficulty: {self.settings['default_difficulty'].title()}", True, WHITE)
+        diff_rect = diff_text.get_rect(center=(SCREEN_WIDTH//2, y_pos))
+        self.screen.blit(diff_text, diff_rect)
+        
+        # Difficulty buttons
+        y_pos += 60
+        for difficulty in ["easy", "normal", "hard"]:
+            btn_rect = pygame.Rect(200 + (difficulty == "easy") * 100, y_pos, 100, 40)
+            color = YELLOW if self.settings["default_difficulty"] == difficulty else GRAY
+            self.draw_button(btn_rect, difficulty.title(), color, LIGHT_GRAY)
+        
+        # Sound volume
+        y_pos += 80
+        vol_text = self.font.render(f"Sound Volume: {int(self.settings['sound_volume'] * 100)}%", True, WHITE)
+        vol_rect = vol_text.get_rect(center=(SCREEN_WIDTH//2, y_pos))
+        self.screen.blit(vol_text, vol_rect)
+        
+        # Volume slider
+        y_pos += 40
+        vol_slider_rect = pygame.Rect(200, y_pos, 400, 20)
+        pygame.draw.rect(self.screen, GRAY, vol_slider_rect)
+        vol_fill_rect = pygame.Rect(200, y_pos, int(400 * self.settings['sound_volume']), 20)
+        pygame.draw.rect(self.screen, BLUE, vol_fill_rect)
+        
+        # Toggle options
+        y_pos += 60
+        toggle_texts = [
+            ("Show Power Meter", "show_power_meter"),
+            ("Show Instructions", "show_instructions")
+        ]
+        
+        for text, setting_key in toggle_texts:
+            toggle_text = self.font.render(text, True, WHITE)
+            toggle_rect = toggle_text.get_rect(center=(SCREEN_WIDTH//2 - 100, y_pos))
+            self.screen.blit(toggle_text, toggle_rect)
+            
+            # Toggle button
+            toggle_btn_rect = pygame.Rect(SCREEN_WIDTH//2 + 50, y_pos - 15, 60, 30)
+            color = GREEN if self.settings[setting_key] else RED
+            self.draw_button(toggle_btn_rect, "ON" if self.settings[setting_key] else "OFF", color, LIGHT_GRAY)
+            y_pos += 40
+        
+        # Back button
+        back_rect = pygame.Rect(300, 500, 200, 60)
+        self.draw_button(back_rect, "Back to Menu", GRAY, LIGHT_GRAY)
+    
+    def draw_stats_screen(self):
+        """Draw the statistics screen"""
+        self.screen.fill(GREEN)
+        
+        # Title
+        title = self.large_font.render("Game Statistics", True, WHITE)
+        title_rect = title.get_rect(center=(SCREEN_WIDTH//2, 50))
+        self.screen.blit(title, title_rect)
+        
+        # Overall stats
+        total_games = self.stats["total_games"]
+        wins = self.stats["wins"]
+        losses = self.stats["losses"]
+        ties = self.stats["ties"]
+        
+        if total_games > 0:
+            win_rate = (wins / total_games) * 100
+        else:
+            win_rate = 0
+        
+        # Display stats
+        y_pos = 120
+        line_height = 30
+        
+        stats_texts = [
+            f"Total Games: {total_games}",
+            f"Wins: {wins}",
+            f"Losses: {losses}",
+            f"Ties: {ties}",
+            f"Win Rate: {win_rate:.1f}%"
+        ]
+        
+        for text in stats_texts:
+            stat_text = self.font.render(text, True, WHITE)
+            stat_rect = stat_text.get_rect(center=(SCREEN_WIDTH//2, y_pos))
+            self.screen.blit(stat_text, stat_rect)
+            y_pos += line_height
+        
+        # Recent games
+        y_pos += 20
+        recent_title = self.font.render("Recent Games:", True, WHITE)
+        recent_rect = recent_title.get_rect(center=(SCREEN_WIDTH//2, y_pos))
+        self.screen.blit(recent_title, recent_rect)
+        y_pos += line_height
+        
+        # Show last 5 games
+        recent_games = self.stats["games"][-5:] if self.stats["games"] else []
+        for game in recent_games:
+            result = "W" if game["player_score"] > game["cpu_score"] else "L" if game["player_score"] < game["cpu_score"] else "T"
+            game_text = f"{result} {game['player_score']}-{game['cpu_score']} ({game['difficulty']})"
+            game_stat = self.small_font.render(game_text, True, WHITE)
+            game_rect = game_stat.get_rect(center=(SCREEN_WIDTH//2, y_pos))
+            self.screen.blit(game_stat, game_rect)
+            y_pos += 25
+        
+        # Back button (centered)
+        back_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 650, 200, 60)
+        self.draw_button(back_rect, "Back to Menu", GRAY, LIGHT_GRAY)
     
     def end_of_kick(self, was_goal):
         """Handle end-of-kick logic for shootout rules"""
@@ -691,33 +1028,90 @@ class PenaltyShootout:
             if event.type == pygame.QUIT:
                 return False
             
+            if event.type == pygame.KEYDOWN:
+                # Handle spacebar for power meter
+                if event.key == pygame.K_SPACE and self.current_phase == "power_aim":
+                    self.selected_power = self.fill_level
+                    self.aiming = False
+                    self.current_phase = "player_shoot"
+                    self.user_shot = self.aim_direction
+                    
+                    # CPU picks a dive direction based on difficulty
+                    settings = self.difficulty_settings[self.difficulty]
+                    
+                    if random.random() < settings["cpu_guess_accuracy"]:
+                        # CPU dives correctly
+                        self.cpu_keeper_guess = self.user_shot
+                    else:
+                        # CPU dives wrong
+                        wrong = [d for d in self.shot_directions if d != self.user_shot]
+                        self.cpu_keeper_guess = random.choice(wrong)
+                    
+                    # now kick off the animation as before:
+                    self.ball_target = self.get_shot_target(self.user_shot)
+                    self.ball_moving = True
+            
             if event.type == pygame.MOUSEBUTTONDOWN:
                 mouse_pos = pygame.mouse.get_pos()
                 
                 if self.state == MENU:
                     # Check difficulty buttons
-                    for difficulty, rect in [("easy", self.buttons["easy"]), 
-                                           ("normal", self.buttons["normal"]), 
-                                           ("hard", self.buttons["hard"])]:
-                        if rect.collidepoint(mouse_pos):
+                    # Calculate button positions (same as in draw_menu)
+                    button_width = 200
+                    button_height = 60
+                    button_spacing = 20
+                    start_y = 400  # Moved up to match draw_menu
+                    center_x = SCREEN_WIDTH // 2 - button_width // 2
+                    
+                    # Check difficulty buttons (same positions as in draw_menu)
+                    diff_button_width = 120
+                    diff_button_height = 50
+                    diff_button_spacing = 30
+                    total_diff_width = diff_button_width * 3 + diff_button_spacing * 2
+                    diff_start_x = (SCREEN_WIDTH - total_diff_width) // 2
+                    diff_y = 250
+                    
+                    for i, difficulty in enumerate(["easy", "normal", "hard"]):
+                        diff_rect = pygame.Rect(diff_start_x + i * (diff_button_width + diff_button_spacing), diff_y, diff_button_width, diff_button_height)
+                        if diff_rect.collidepoint(mouse_pos):
                             self.difficulty = difficulty
                     
                     # Check continue button
-                    continue_rect = pygame.Rect(300, 400, 200, 60)
+                    continue_rect = pygame.Rect(center_x, start_y, button_width, button_height)
                     if continue_rect.collidepoint(mouse_pos):
                         self.state = CHOOSE_SIDE
+                    
+                    # Check stats button
+                    stats_rect = pygame.Rect(center_x, start_y + button_height + button_spacing, button_width, button_height)
+                    if stats_rect.collidepoint(mouse_pos):
+                        self.state = STATS
+                    
+                    # Check settings button
+                    settings_rect = pygame.Rect(center_x, start_y + (button_height + button_spacing) * 2, button_width, button_height)
+                    if settings_rect.collidepoint(mouse_pos):
+                        self.state = SETTINGS
                 
                 elif self.state == CHOOSE_SIDE:
+                    # Calculate button positions (same as in draw_choose_side)
+                    button_width = 150
+                    button_height = 70
+                    button_spacing = 50
+                    total_width = button_width * 2 + button_spacing
+                    start_x = (SCREEN_WIDTH - total_width) // 2
+                    y_pos = 300
+                    
                     # Check player button
-                    if self.buttons["player"].collidepoint(mouse_pos):
+                    player_rect = pygame.Rect(start_x, y_pos, button_width, button_height)
+                    if player_rect.collidepoint(mouse_pos):
                         self.user_is_player = True
                     
                     # Check computer button
-                    if self.buttons["computer"].collidepoint(mouse_pos):
+                    computer_rect = pygame.Rect(start_x + button_width + button_spacing, y_pos, button_width, button_height)
+                    if computer_rect.collidepoint(mouse_pos):
                         self.user_is_player = False
                     
                     # Check start button
-                    start_rect = pygame.Rect(300, 450, 200, 60)
+                    start_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, y_pos + button_height + 50, 200, 60)
                     if start_rect.collidepoint(mouse_pos):
                         self.state = PLAYING
                         self.reset_game()
@@ -736,22 +1130,34 @@ class PenaltyShootout:
                                                ("center", self.buttons["center"]), 
                                                ("right", self.buttons["right"])]:
                             if rect.collidepoint(mouse_pos):
-                                self.user_shot = direction
-                                # CPU picks a dive direction based on difficulty
-                                settings = self.difficulty_settings[self.difficulty]
-                                
-                                if random.random() < settings["cpu_guess_accuracy"]:
-                                    # CPU dives correctly
-                                    self.cpu_keeper_guess = self.user_shot
+                                if not self.aiming:
+                                    # First click: enter power-aim phase
+                                    self.aiming = True
+                                    self.aim_timer = 0.0
+                                    self.fill_level = 0.0
+                                    self.aim_direction = direction
+                                    self.current_phase = "power_aim"
                                 else:
-                                    # CPU dives wrong
-                                    wrong = [d for d in self.shot_directions if d != self.user_shot]
-                                    self.cpu_keeper_guess = random.choice(wrong)
-                                
-                                # now kick off the animation as before:
-                                self.ball_target = self.get_shot_target(direction)
-                                self.ball_moving = True
-                                # keep current_phase = "player_shoot" so animate_ball() can resolve
+                                    # Second click: lock power and shoot
+                                    self.selected_power = self.fill_level
+                                    self.aiming = False
+                                    self.current_phase = "player_shoot"
+                                    self.user_shot = self.aim_direction
+                                    
+                                    # CPU picks a dive direction based on difficulty
+                                    settings = self.difficulty_settings[self.difficulty]
+                                    
+                                    if random.random() < settings["cpu_guess_accuracy"]:
+                                        # CPU dives correctly
+                                        self.cpu_keeper_guess = self.user_shot
+                                    else:
+                                        # CPU dives wrong
+                                        wrong = [d for d in self.shot_directions if d != self.user_shot]
+                                        self.cpu_keeper_guess = random.choice(wrong)
+                                    
+                                    # now kick off the animation as before:
+                                    self.ball_target = self.get_shot_target(self.user_shot)
+                                    self.ball_moving = True
                     
                     # Handle player saving
                     elif self.current_phase == "player_save" and not self.ball_moving:
@@ -762,19 +1168,8 @@ class PenaltyShootout:
                             if rect.collidepoint(mouse_pos):
                                 self.player_keeper_guess = direction
                                 
-                                # Your chosen dive direction is `self.player_keeper_guess`
-                                # Now decide where CPU actually aims:
-                                settings = self.difficulty_settings[self.difficulty]
-                                
-                                if random.random() < settings["player_guess_accuracy"]:
-                                    # CPU shoots where you dive → you save
-                                    self.computer_shot = self.player_keeper_guess
-                                else:
-                                    # CPU shoots elsewhere → you likely miss
-                                    wrong = [d for d in self.shot_directions if d != self.player_keeper_guess]
-                                    self.computer_shot = random.choice(wrong)
-                                
-                                # start animation:
+                                # CPU has already decided where to shoot (in update_game)
+                                # Just start the animation with the pre-determined shot
                                 self.ball_target = self.get_shot_target(self.computer_shot)
                                 self.ball_moving = True
                                 self.current_phase = "cpu_shoot"
@@ -795,15 +1190,50 @@ class PenaltyShootout:
                     return True  # swallow other clicks while paused
                 
                 elif self.state == GAME_OVER:
+                    # Record stats when game ends
+                    if not hasattr(self, "stats_recorded"):
+                        self.record_game_stats()
+                        self.stats_recorded = True
+                    
                     # Check play again button
-                    play_again_rect = pygame.Rect(300, 380, 200, 60)
+                    play_again_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 450, 200, 60)
                     if play_again_rect.collidepoint(mouse_pos):
                         self.state = PLAYING
                         self.reset_game()
                     
                     # Check menu button
-                    menu_rect = pygame.Rect(300, 460, 200, 60)
+                    menu_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 530, 200, 60)
                     if menu_rect.collidepoint(mouse_pos):
+                        self.state = MENU
+                
+                elif self.state == STATS:
+                    # Check back button
+                    back_rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 650, 200, 60)
+                    if back_rect.collidepoint(mouse_pos):
+                        self.state = MENU
+                
+                elif self.state == SETTINGS:
+                    # Check difficulty buttons
+                    y_pos = 180
+                    for difficulty in ["easy", "normal", "hard"]:
+                        btn_rect = pygame.Rect(200 + (difficulty == "easy") * 100, y_pos, 100, 40)
+                        if btn_rect.collidepoint(mouse_pos):
+                            self.settings["default_difficulty"] = difficulty
+                            self.difficulty = difficulty
+                            self.save_settings()
+                    
+                    # Check toggle buttons
+                    y_pos = 320
+                    for setting_key in ["show_power_meter", "show_instructions"]:
+                        toggle_btn_rect = pygame.Rect(SCREEN_WIDTH//2 + 50, y_pos - 15, 60, 30)
+                        if toggle_btn_rect.collidepoint(mouse_pos):
+                            self.settings[setting_key] = not self.settings[setting_key]
+                            self.save_settings()
+                        y_pos += 40
+                    
+                    # Check back button
+                    back_rect = pygame.Rect(300, 500, 200, 60)
+                    if back_rect.collidepoint(mouse_pos):
                         self.state = MENU
         
         return True
@@ -813,6 +1243,13 @@ class PenaltyShootout:
         if self.state != PLAYING:
             return
         
+        # Update power meter fill animation
+        if self.aiming:
+            dt = 1.0 / FPS  # delta time
+            self.aim_timer += dt
+            # loop every aim_duration
+            self.fill_level = (self.aim_timer % self.aim_duration) / self.aim_duration
+        
         # Animate ball
         self.animate_ball()
         
@@ -820,6 +1257,14 @@ class PenaltyShootout:
         if self.current_phase == "cpu_shoot" and not self.ball_moving and not self.goal_animation and not self.save_animation:
             # Switch to player save phase so player can choose dive
             self.current_phase = "player_save"
+        
+        # Handle CPU shot decision when entering player_save phase
+        if self.current_phase == "player_save" and self.computer_shot is None:
+            # CPU decides where to shoot BEFORE player chooses dive direction
+            settings = self.difficulty_settings[self.difficulty]
+            
+            # CPU randomly picks a direction (not influenced by player's choice)
+            self.computer_shot = random.choice(self.shot_directions)
         
         # Handle round completion
         if self.goal_animation or self.save_animation:
@@ -829,7 +1274,7 @@ class PenaltyShootout:
                 self.goal_animation = False
                 self.save_animation = False
                 self.animation_delay = 0
-                self.ball_pos = [400, 500]
+                self.ball_pos = [512, 650]  # Reset to original position
                 self.user_shot = None
                 self.computer_shot = None
                 self.computer_guess_direction = None
@@ -858,6 +1303,10 @@ class PenaltyShootout:
                 self.draw_game()  # Draw game with pause overlay
             elif self.state == GAME_OVER:
                 self.draw_game_over()
+            elif self.state == STATS:
+                self.draw_stats_screen()
+            elif self.state == SETTINGS:
+                self.draw_settings_screen()
             
             pygame.display.flip()
             self.clock.tick(FPS)
